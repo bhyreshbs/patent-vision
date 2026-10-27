@@ -1,0 +1,22 @@
+# Render blueprint for the backend. The frontend is deployed on Vercel (root directory: frontend).
+# SQLite and uploaded/generated images live on the persistent disk, so a disk-capable (paid) plan is required.
+services:
+  - type: web
+    name: patentvision-api
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    healthCheckPath: /health
+    disk:
+      name: patentvision-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: PV_DATABASE_URL
+        value: sqlite:////data/patentvision.db
+      - key: PV_STORAGE_ROOT
+        value: /data/storage
+      - key: PV_SECRET_KEY
+        generateValue: true
+      - key: PV_CORS_ORIGINS
+        sync: false # set to ["https://<your-vercel-domain>"] after the frontend is deployed
