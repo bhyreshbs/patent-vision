@@ -4,8 +4,9 @@ Turns photographs of physical products into clean black-and-white, patent-style 
 Implements the prototype described in `PatentVision_AI_PRD.pdf`.
 
 ```
-backend/    FastAPI + SQLAlchemy + Alembic + OpenCV pipeline (Python)
-frontend/   Next.js + React + TypeScript + Tailwind dashboard
+backend/    FastAPI + SQLAlchemy + Alembic + OpenCV pipeline (Python)  → served at /api
+frontend/   Next.js + React + TypeScript + Tailwind dashboard          → served at /
+vercel.json Vercel Services: both deploy together as one project on one domain
 ```
 
 > Drawings are drafts that assist patent preparation. They do not guarantee patent-office acceptance and should
@@ -30,13 +31,13 @@ uvicorn app.main:app --reload
 ```bash
 cd frontend
 npm install
-copy .env.example .env.local    # NEXT_PUBLIC_API_URL=http://localhost:8000
-npm run dev
+npm run dev                     # proxies /api/* to http://127.0.0.1:8000 (override with API_PROXY_TARGET)
 ```
 
-Register an account, create a project, upload a product photo, choose its view, press **Generate drawing**.
-The image page shows the original, background-removed image, segmentation mask, extracted outline and the final
-drawing side by side, with downloads for each.
+Register, create a project and drop product photos onto it. With **Generate drawings automatically** on, each
+photo is processed right after upload. The image page shows a pipeline stepper (which stage passed or failed),
+a before/after slider comparing the photo with the outline, mask or cut-out, the final drawing, processing details
+and downloads (drawing as PNG and SVG, mask, outline, cut-out, original).
 
 ### See the pipeline without the web app
 
@@ -69,14 +70,16 @@ input and output and raises a `PipelineError` naming the failed stage plus a nex
 
 ### Statuses and failures
 
-`Uploaded → Queued → Processing → Completed | Failed`. A job only becomes `Completed` after all four output files
-are written and verified. Any failure is stored (stage + message) on the job and result, partial outputs are
-removed, and the job can be retried (`retry_count`). Jobs left `Queued`/`Processing` by a server restart are
-surfaced as `Failed (interrupted)` on startup.
+`Uploaded → Queued → Processing → Completed | Failed`. Processing runs inside the request that starts it (about a
+second per photo), and claiming a job is atomic, so the same image can never be processed twice at once. A job only
+becomes `Completed` after every output file is written and verified. Any failure is stored (stage + message) on the
+job and result, partial outputs are removed, and the job can be retried (`retry_count`). A job still in flight after
+`PV_STALE_JOB_MINUTES` (default 10) lost its worker and is shown as `Failed (interrupted)`.
 
 ### API
 
-All routes except `/auth/*` and `/health` require `Authorization: Bearer <token>`. Other users' resources return 404.
+All routes except `/auth/*`, `/meta` and `/health` require `Authorization: Bearer <token>`. Other users' resources
+return 404. Routes answer both at `/…` (local) and `/api/…` (as routed on Vercel).
 
 | Method | Endpoint | Purpose |
 |---|---|---|
@@ -85,19 +88,20 @@ All routes except `/auth/*` and `/health` require `Authorization: Bearer <token>
 | GET/PUT/DELETE | `/projects/{id}` | Details / update / delete (cascades rows and files) |
 | POST/GET | `/projects/{id}/images` | Upload (multipart `file`, `view_type`) / list |
 | GET/PATCH/DELETE | `/images/{id}` | Metadata / correct view / delete · `GET /images/{id}/original` |
-| POST | `/ai/process/{image_id}` | Queue one image (409 if already active) |
-| POST | `/ai/process/project/{project_id}` | Queue every non-active image in a project |
+| POST | `/ai/process/{image_id}` | Process one image; returns its final status (409 if already in flight) |
+| POST | `/ai/process/project/{project_id}` | Process every image in a project that is not in flight |
 | GET | `/ai/results/{result_id}` | Result metadata and asset URLs |
-| GET | `/ai/results/{result_id}/download?kind=drawing\|mask\|outline\|background_removed\|original` | Owner-only file download (`&download=true` for attachment) |
-| GET | `/dashboard` | Counts, recent projects and results |
+| GET | `/ai/results/{result_id}/download?kind=drawing\|svg\|mask\|outline\|background_removed\|original` | Owner-only file download (`&download=true` for attachment) |
+| GET | `/dashboard` · `/meta` | Counts, recent projects and results · public upload limits |
 
-Errors are structured: `{"error": {"code", "message", "next_action"?}}`. Responses never contain filesystem paths;
-the database stores keys relative to `PV_STORAGE_ROOT`.
+Errors are structured: `{"error": {"code", "message", "next_action"?}}`. Responses never contain filesystem paths
+or storage URLs; files are always served through the API after an ownership check.
 
 ### Configuration
 
-All settings use the `PV_` prefix (see `backend/.env.example`): database URL, storage root, secret key, upload
-size limit, processing resolution, segmenter, rate limit, concurrent-job limit, CORS origins.
+All settings use the `PV_` prefix (see `backend/.env.example`): database URL (falls back to `DATABASE_URL` /
+`POSTGRES_URL`), storage backend (`local` / `blob` / `auto`), secret key, upload size limit, processing resolution,
+segmenter, rate limit, concurrent-job limit, stale-job timeout, CORS origins.
 
 ## Using Segment Anything instead of the classical segmenter
 
@@ -113,22 +117,36 @@ clear `segmentation` error instead of silently degrading. Its candidate masks go
 the foreground mask is the controlled fallback when SAM returns an incomplete mask. This path is not exercised by
 the automated tests (no model files in CI).
 
-## Deployment
+## Deployment (Vercel)
 
-- **Frontend → Vercel.** Import the repo, set **Root Directory** to `frontend`, and add the environment variable
-  `NEXT_PUBLIC_API_URL` = the public URL of the backend (no trailing slash).
-- **Backend → any Docker host with a persistent disk** (`render.yaml` is a ready Render blueprint; `backend/Dockerfile`
-  works anywhere). The backend keeps SQLite and all images on disk and runs jobs in-process, so it cannot run on
-  Vercel Functions (read-only, ephemeral filesystem). Set `PV_CORS_ORIGINS=["https://<your-vercel-domain>"]`, a long
-  random `PV_SECRET_KEY`, and mount the disk at `/data` (`PV_DATABASE_URL=sqlite:////data/patentvision.db`,
-  `PV_STORAGE_ROOT=/data/storage`). Run a single instance.
+One Vercel project, configured by `vercel.json` with **Vercel Services**: the Next.js app serves `/`, the FastAPI
+app serves `/api/*`, and both ship in the same deployment on one domain (no CORS).
+
+| Need | On Vercel | Setting |
+|---|---|---|
+| Database | Neon Postgres (Marketplace) | `DATABASE_URL` is injected when the store is connected to the project |
+| Files (uploads, outputs) | Vercel Blob, **private** store | `BLOB_READ_WRITE_TOKEN` is injected when the store is connected |
+| Login token signing | Project environment variable | `PV_SECRET_KEY` (long random value, type *sensitive*) |
+
+Project settings: Framework Preset **Services**, Root Directory empty (repo root). Every push to `main` deploys.
+Tables are created automatically on first request (`PV_AUTO_CREATE_TABLES=true`); to manage the schema with Alembic
+instead, run `alembic stamp head` once against the database and `alembic upgrade head` on later changes.
+Without a database the API answers `503 database_not_configured` instead of silently using temporary storage.
+
+Serverless limits that shaped the design: request bodies are capped at 4.5 MB, so uploads are limited to 4 MB and
+the web app re-encodes larger photos in the browser; files are always read through the API (private Blob store);
+jobs finish inside the request.
+
+`backend/Dockerfile` and `render.yaml` remain for hosting the API on a container platform with a persistent disk
+instead (`PV_DATABASE_URL=sqlite:////data/patentvision.db`, `PV_STORAGE_ROOT=/data/storage`).
 
 ## Scope notes
 
-- Implemented: FR-01 through FR-11 and FR-13 (separate drawing per view; failed views reprocess individually).
-- Not implemented (PRD marks post-MVP/later): FR-12 manual editor, FR-14 SVG/PDF patent-sheet export, HEIC decoding
-  (rejected with a clear message), object storage, subscriptions.
+- Implemented: FR-01 through FR-11, FR-13 (separate drawing per view; failed views reprocess individually), and from
+  later scope: before/after comparison and SVG export of the drawing.
+- Not implemented (PRD marks post-MVP/later): FR-12 manual editor, drawing sheets/figure numbering/PDF export, HEIC
+  decoding (rejected with a clear message), subscriptions.
 - Thresholds in `mask_validation.py` and `background.py` are tuned on synthetic photos with exact ground truth;
   validate them against a representative real-photo set before relying on the success-metric targets in PRD §16.
-- Rate limiting and job execution are in-process (single-server prototype). Use a real queue and shared limiter
-  store for multi-worker deployments.
+- The rate limiter is per process (on serverless, per instance). Use a shared store such as Upstash Redis for a
+  strict global limit.

@@ -9,7 +9,6 @@ from sqlalchemy import select
 from app.core import database
 from app.core.storage import storage
 from app.models import AIResult, Image, ProcessingJob
-from app.services.processing import recover_interrupted
 from tests import synthetic
 from tests.conftest import upload
 
@@ -103,7 +102,8 @@ def test_upload_process_verify_and_download(client, auth, project, organizer_pho
     iid = upload(client, auth, project["id"], data).json()["id"]
 
     r = client.post(f"/ai/process/{iid}", headers=auth)
-    assert r.status_code == 202
+    assert r.status_code == 200
+    assert r.json()["status"] == "Completed"  # processing finishes within the request
     assert r.json()["job"]["retry_count"] == 0
 
     image = client.get(f"/images/{iid}", headers=auth).json()
@@ -114,7 +114,7 @@ def test_upload_process_verify_and_download(client, auth, project, organizer_pho
     assert res["metrics"]["mask_candidate"] in {"grabcut", "foreground-mask"}
 
     got = {}
-    for kind in ("drawing", "background_removed", "mask", "outline", "original"):
+    for kind in ("drawing", "svg", "background_removed", "mask", "outline", "original"):
         url = res["urls"][kind]
         assert url, kind
         d = client.get(url, headers=auth)
@@ -132,6 +132,8 @@ def test_upload_process_verify_and_download(client, auth, project, organizer_pho
     assert drawing[:5, :5].min() == 255 and (drawing < 128).any()
     cut = decode(got["background_removed"])
     assert cut.shape[2] == 4
+    svg = got["svg"].decode()
+    assert svg.startswith("<svg") and "<path" in svg and 'stroke="#000"' in svg
 
     # result endpoints
     rid = res["id"]
@@ -142,7 +144,13 @@ def test_upload_process_verify_and_download(client, auth, project, organizer_pho
     # files live under the storage root as relative keys
     with database.SessionLocal() as db:
         row = db.scalar(select(AIResult).where(AIResult.id == rid))
-        for key in (row.mask_path, row.outline_path, row.patent_drawing_path, row.background_removed_path):
+        for key in (
+            row.mask_path,
+            row.outline_path,
+            row.patent_drawing_path,
+            row.background_removed_path,
+            row.drawing_svg_path,
+        ):
             assert not key.startswith("/") and ":" not in key
             assert storage.exists(key)
 
@@ -167,7 +175,7 @@ def test_downloads_are_owner_only(client, auth, other_auth, project, organizer_p
 def test_failed_processing_is_never_reported_as_completed(client, auth, project):
     blank = png_bytes(np.full((300, 400, 3), 235, np.uint8))
     iid = upload(client, auth, project["id"], blank).json()["id"]
-    assert client.post(f"/ai/process/{iid}", headers=auth).status_code == 202
+    assert client.post(f"/ai/process/{iid}", headers=auth).status_code == 200
 
     image = client.get(f"/images/{iid}", headers=auth).json()
     assert image["processing_status"] == "Failed"
@@ -192,7 +200,7 @@ def test_retry_after_failure_succeeds_and_counts_retries(client, auth, project, 
         db.commit()
 
     r = client.post(f"/ai/process/{iid}", headers=auth)
-    assert r.status_code == 202 and r.json()["job"]["retry_count"] == 1
+    assert r.status_code == 200 and r.json()["job"]["retry_count"] == 1
     image = client.get(f"/images/{iid}", headers=auth).json()
     assert image["processing_status"] == "Completed"
     assert image["result"]["error_message"] is None and image["result"]["failed_stage"] is None
@@ -271,7 +279,7 @@ def test_process_project_queues_every_image_and_failed_views_can_rerun(client, a
     good = upload(client, auth, pid, organizer_photo[2], view="Front").json()["id"]
     bad = upload(client, auth, pid, png_bytes(np.full((300, 400, 3), 235, np.uint8)), view="Rear").json()["id"]
     r = client.post(f"/ai/process/project/{pid}", headers=auth)
-    assert r.status_code == 202 and sorted(r.json()["queued"]) == sorted([good, bad])
+    assert r.status_code == 200 and sorted(r.json()["queued"]) == sorted([good, bad])
 
     statuses = {i["id"]: i["processing_status"] for i in client.get(f"/projects/{pid}/images", headers=auth).json()}
     assert statuses == {good: "Completed", bad: "Failed"}
@@ -279,7 +287,7 @@ def test_process_project_queues_every_image_and_failed_views_can_rerun(client, a
     assert summary["image_count"] == 2 and summary["status_counts"] == {"Completed": 1, "Failed": 1}
 
     # only the failed view needs reprocessing; each view keeps its own drawing
-    assert client.post(f"/ai/process/{bad}", headers=auth).status_code == 202
+    assert client.post(f"/ai/process/{bad}", headers=auth).status_code == 200
     assert client.get(f"/images/{good}", headers=auth).json()["result"]["urls"]["drawing"]
     assert client.post("/ai/process/project/9999", headers=auth).status_code == 404
 
@@ -293,17 +301,28 @@ def test_dashboard_summarises_activity(client, auth, project, organizer_photo):
     assert d["recent_results"][0]["id"] == iid
 
 
-def test_interrupted_jobs_are_surfaced_as_failed_on_restart(client, auth, project, organizer_photo):
+def test_stale_in_flight_jobs_are_surfaced_as_failed(client, auth, project, organizer_photo):
+    from datetime import timedelta
+
+    from app.models import utcnow
+
     iid = upload(client, auth, project["id"], organizer_photo[2]).json()["id"]
     with database.SessionLocal() as db:
         db.get(Image, iid).processing_status = "Processing"
         db.add(ProcessingJob(image_id=iid, job_status="Processing"))
         db.add(AIResult(image_id=iid, status="Processing"))
         db.commit()
-    assert recover_interrupted() == 1
+    # a job that is still fresh stays in flight and cannot be started twice
+    assert client.get(f"/images/{iid}", headers=auth).json()["processing_status"] == "Processing"
+    assert client.post(f"/ai/process/{iid}", headers=auth).status_code == 409
+
+    with database.SessionLocal() as db:  # worker died long ago (crash / timeout)
+        db.get(Image, iid).result.updated_at = utcnow() - timedelta(hours=1)
+        db.commit()
     image = client.get(f"/images/{iid}", headers=auth).json()
     assert image["processing_status"] == "Failed" and image["result"]["failed_stage"] == "interrupted"
-    assert client.post(f"/ai/process/{iid}", headers=auth).status_code == 202  # and it can be retried
+    r = client.post(f"/ai/process/{iid}", headers=auth)  # and it can be retried
+    assert r.status_code == 200 and r.json()["status"] == "Completed"
 
 
 # ---------------- deletion / cleanup ----------------

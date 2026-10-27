@@ -13,7 +13,7 @@ from app.ai.errors import PipelineError
 from app.ai.imaging import encode_png, load_image, scale_box
 from app.ai.localization import gap_for, localize_product
 from app.ai.mask_validation import choose_mask
-from app.ai.rendering import overlay_outline, render_drawing, validate_drawing
+from app.ai.rendering import overlay_outline, render_drawing, render_svg, validate_drawing
 from app.ai.segmentation import Segmenter, get_segmenter
 from app.core.config import Settings, get_settings
 
@@ -35,6 +35,7 @@ class PipelineOutput:
     mask: bytes  # binary PNG, white product on black
     outline: bytes  # PNG: extracted outline over the source photo
     drawing: bytes  # PNG: white background, black outline
+    drawing_svg: bytes  # SVG: the same drawing as vector paths
     metrics: dict
 
 
@@ -105,5 +106,8 @@ def run_pipeline(
         mask=encode_png(mask),
         outline=encode_png(overlay_outline(bgr, contours)),
         drawing=encode_png(drawing.image),
+        drawing_svg=render_svg(
+            contours, long_side=settings.drawing_long_side, line_width=settings.drawing_line_width
+        ).encode(),
         metrics=metrics,
     )

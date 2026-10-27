@@ -12,3 +12,5 @@ backend/checkpoints/
 node_modules/
 .next/
 frontend/.env.local
+.vercel/
+*.pdf

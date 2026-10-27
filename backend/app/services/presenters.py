@@ -7,6 +7,7 @@ from app.schemas import ImageOut, JobOut, ProjectOut, ResultOut
 
 DOWNLOAD_KINDS = {
     "drawing": "patent_drawing_path",
+    "svg": "drawing_svg_path",
     "background_removed": "background_removed_path",
     "mask": "mask_path",
     "outline": "outline_path",

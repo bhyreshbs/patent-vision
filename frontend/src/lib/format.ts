@@ -45,7 +45,8 @@ export function processActionLabel(status: ImageStatus): string | null {
 }
 
 const ACCEPTED = ["image/jpeg", "image/png", "image/webp"];
-export const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+/** Largest photo we try to shrink in the browser; anything under the server limit is sent as-is. */
+export const MAX_UPLOAD_BYTES = 40 * 1024 * 1024;
 
 /** Client-side pre-check so users get immediate feedback; the server remains the authority. */
 export function checkUploadFile(file: { name: string; type: string; size: number }): string | null {

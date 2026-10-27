@@ -85,6 +85,29 @@ def validate_drawing(drawing: Drawing) -> dict:
     return {"width": w, "height": h, "ink_fraction": round(ink_fraction, 5), "line_width_ratio": round(ratio, 3)}
 
 
+def render_svg(contours: ContourSet, long_side: int = 1400, line_width: float = 4.0) -> str:
+    """Vector version of the drawing: same framing and stroke as render_drawing, as SVG paths."""
+    allpts = np.concatenate(contours.outer)
+    mn, mx = allpts.min(axis=0), allpts.max(axis=0)
+    bw, bh = float(mx[0] - mn[0]), float(mx[1] - mn[1])
+    margin = MARGIN_RATIO * long_side
+    scale = (long_side - 2 * margin) / max(bw, bh)
+    width, height = round(bw * scale + 2 * margin), round(bh * scale + 2 * margin)
+
+    paths = []
+    for pts in contours.all:
+        mapped = (pts - mn) * scale + margin
+        coords = " L".join(f"{x:.2f},{y:.2f}" for x, y in mapped)
+        paths.append(f'<path d="M{coords} Z"/>')
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">'
+        f'<rect width="100%" height="100%" fill="#fff"/>'
+        f'<g fill="none" stroke="#000" stroke-width="{line_width:g}" stroke-linejoin="round" '
+        f'stroke-linecap="round">{"".join(paths)}</g></svg>'
+    )
+
+
 def overlay_outline(bgr: np.ndarray, contours: ContourSet) -> np.ndarray:
     """Review image: the extracted outline drawn on the source photo (same size as the mask)."""
     out = bgr.copy()

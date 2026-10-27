@@ -20,8 +20,15 @@ export interface Project {
   status_counts: Partial<Record<ImageStatus, number>>;
 }
 
+export interface Meta {
+  max_upload_bytes: number;
+  accepted_types: string[];
+  storage: "blob" | "local";
+}
+
 export interface ResultUrls {
   drawing: string | null;
+  svg: string | null;
   background_removed: string | null;
   mask: string | null;
   outline: string | null;

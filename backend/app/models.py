@@ -93,6 +93,7 @@ class AIResult(Base):
     mask_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     outline_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     patent_drawing_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    drawing_svg_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="Queued")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     failed_stage: Mapped[str | None] = mapped_column(String(50), nullable=True)

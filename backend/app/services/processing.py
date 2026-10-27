@@ -1,9 +1,15 @@
-"""Job lifecycle: queue -> process -> persist, with failures always recorded and visible."""
+"""Job lifecycle: claim -> process -> persist, with failures always recorded and visible.
+
+Jobs run inside the request that starts them (about a second per photo), which works on serverless
+platforms where work after the response is not guaranteed. A job left Queued/Processing longer than
+`stale_job_minutes` lost its worker (crash or timeout) and is surfaced as Failed so it can be retried.
+"""
 import logging
 import threading
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 
-from sqlalchemy import select
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.ai.errors import PipelineError
@@ -17,11 +23,13 @@ from app.models import ACTIVE_STATUSES, AIResult, Image, ProcessingJob, utcnow
 
 log = logging.getLogger("patentvision.processing")
 
+# (pipeline output attribute, result column, file name, content type)
 _OUTPUTS = (
-    ("background_removed", "background_removed_path"),
-    ("mask", "mask_path"),
-    ("outline", "outline_path"),
-    ("drawing", "patent_drawing_path"),
+    ("background_removed", "background_removed_path", "background_removed.png", "image/png"),
+    ("mask", "mask_path", "mask.png", "image/png"),
+    ("outline", "outline_path", "outline.png", "image/png"),
+    ("drawing", "patent_drawing_path", "drawing.png", "image/png"),
+    ("drawing_svg", "drawing_svg_path", "drawing.svg", "image/svg+xml"),
 )
 _slot_lock = threading.Lock()
 _slots: threading.BoundedSemaphore | None = None
@@ -45,22 +53,52 @@ def generated_prefix(image: Image) -> str:
     return f"generated/{image.project_id}/{image.id}"
 
 
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
 def _clear_outputs(result: AIResult, image: Image) -> None:
-    storage.delete_tree(generated_prefix(image))
-    for _, attr in _OUTPUTS:
+    try:
+        storage.delete_tree(generated_prefix(image))
+    except Exception:  # cleanup must never hide the real failure
+        log.exception("could not delete partial outputs for image %s", image.id)
+    for _, attr, _, _ in _OUTPUTS:
         setattr(result, attr, None)
     result.metrics = None
 
 
+def expire_stale(db: Session, images: list[Image]) -> None:
+    """Mark jobs that have been in flight longer than the stale timeout as Failed (interrupted)."""
+    cutoff = utcnow() - timedelta(minutes=get_settings().stale_job_minutes)
+    for image in images:
+        if image.processing_status not in ACTIVE_STATUSES or image.result is None:
+            continue
+        last_change = _as_utc(image.result.updated_at)
+        if last_change < cutoff:
+            _mark_failed(
+                db, image.id, "interrupted", "Processing was interrupted before it finished. Retry processing."
+            )
+
+
 def queue_image(db: Session, image: Image) -> ProcessingJob:
-    """Mark an image Queued. Safe to call repeatedly: an in-flight job is never duplicated."""
-    if image.processing_status in ACTIVE_STATUSES:
+    """Claim an image for processing. Atomic: concurrent requests can never both start a job."""
+    expire_stale(db, [image])
+    claimed = db.execute(
+        update(Image)
+        .where(Image.id == image.id, Image.processing_status.not_in(ACTIVE_STATUSES))
+        .values(processing_status="Queued")
+        .execution_options(synchronize_session=False)
+    ).rowcount
+    if not claimed:
+        db.rollback()
         raise ApiError(
             409,
             "already_processing",
             "This image is already queued or being processed.",
             "Wait for the current job to finish.",
         )
+    db.refresh(image)
+
     job = image.job
     if job is None:
         job = ProcessingJob(image_id=image.id, retry_count=0)
@@ -77,15 +115,14 @@ def queue_image(db: Session, image: Image) -> ProcessingJob:
         db.add(result)
     result.status = "Queued"
     result.error_message = result.failed_stage = None
-
-    image.processing_status = "Queued"
+    result.updated_at = utcnow()
     db.commit()
     db.refresh(job)
     return job
 
 
 def run_job(image_id: int) -> None:
-    """Background entry point; owns its own DB session."""
+    """Process a claimed image. Owns its own DB session."""
     with _job_slots():
         db = database.SessionLocal()
         try:
@@ -123,13 +160,10 @@ def _execute(db: Session, image_id: int) -> None:
         current["stage"] = "save"
         prefix = generated_prefix(image)
         files = {
-            "background_removed_path": storage.save_bytes(f"{prefix}/background_removed.png", out.background_removed),
-            "mask_path": storage.save_bytes(f"{prefix}/mask.png", out.mask),
-            "outline_path": storage.save_bytes(f"{prefix}/outline.png", out.outline),
-            "patent_drawing_path": storage.save_bytes(f"{prefix}/drawing.png", out.drawing),
+            attr: storage.save_bytes(f"{prefix}/{name}", getattr(out, field), content_type)
+            for field, attr, name, content_type in _OUTPUTS
         }
-        missing = [k for k, v in files.items() if not storage.exists(v)]
-        if missing:
+        if not all(storage.exists(key) for key in files.values()):
             raise PipelineError("save", "Generated files could not be saved.", "Retry processing.")
 
         current["stage"] = "persistence"
@@ -168,15 +202,3 @@ def _mark_failed(db: Session, image_id: int, stage: str, message: str) -> None:
         result.status, result.error_message, result.failed_stage = "Failed", message, stage
     db.commit()
     log.warning("image %s failed at %s: %s", image_id, stage, message)
-
-
-def recover_interrupted() -> int:
-    """After a restart no worker owns Queued/Processing jobs: surface them as Failed so they can be retried."""
-    db = database.SessionLocal()
-    try:
-        ids = db.scalars(select(Image.id).where(Image.processing_status.in_(ACTIVE_STATUSES))).all()
-        for image_id in ids:
-            _mark_failed(db, image_id, "interrupted", "Processing was interrupted by a server restart. Retry processing.")
-        return len(ids)
-    finally:
-        db.close()

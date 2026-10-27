@@ -1,6 +1,7 @@
-import type { Dashboard, ImageItem, Project, User, ViewType } from "./types";
+import type { Dashboard, ImageItem, Meta, Project, User, ViewType } from "./types";
 
-export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+/** Same-origin by default: Vercel routes /api/* to the FastAPI service; `next dev` proxies it locally. */
+export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "/api";
 const TOKEN_KEY = "pv_token";
 
 export class ApiError extends Error {
@@ -69,6 +70,7 @@ export const api = {
   login: (email: string, password: string) =>
     json<{ access_token: string; user: User }>("/auth/login", { method: "POST", ...body({ email, password }) }),
   me: () => json<User>("/auth/me"),
+  meta: () => json<Meta>("/meta"),
 
   dashboard: () => json<Dashboard>("/dashboard"),
   listProjects: () => json<Project[]>("/projects"),
@@ -91,7 +93,8 @@ export const api = {
     json<ImageItem>(`/images/${id}`, { method: "PATCH", ...body({ view_type: view }) }),
   deleteImage: (id: number) => json<void>(`/images/${id}`, { method: "DELETE" }),
 
-  processImage: (id: number) => json<unknown>(`/ai/process/${id}`, { method: "POST" }),
+  processImage: (id: number) =>
+    json<{ image_id: number; status: ImageItem["processing_status"] }>(`/ai/process/${id}`, { method: "POST" }),
   processProject: (id: number) => json<{ queued: number[]; skipped: number[] }>(`/ai/process/project/${id}`, { method: "POST" }),
 };
 

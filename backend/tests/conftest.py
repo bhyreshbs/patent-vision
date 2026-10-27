@@ -5,11 +5,14 @@ from pathlib import Path
 
 # Configure the app BEFORE importing it: tests use a throw-away database and storage root.
 _TMP = Path(tempfile.mkdtemp(prefix="pv-tests-"))
+os.environ["PV_ENV_FILE"] = ""  # ignore any developer .env
 os.environ["PV_DATABASE_URL"] = f"sqlite:///{(_TMP / 'test.db').as_posix()}"
 os.environ["PV_STORAGE_ROOT"] = str(_TMP / "storage")
 os.environ["PV_SECRET_KEY"] = "test-secret-key"
 os.environ["PV_RATE_LIMIT_PER_MINUTE"] = "1000"
 os.environ["PV_AUTO_CREATE_TABLES"] = "false"
+os.environ["PV_STORAGE_BACKEND"] = "local"
+os.environ.pop("VERCEL", None)
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

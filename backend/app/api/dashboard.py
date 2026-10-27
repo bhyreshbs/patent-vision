@@ -6,9 +6,21 @@ from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models import Image, Project, User
 from app.schemas import DashboardOut
+from app.core.config import get_settings
 from app.services.presenters import image_out, project_out
 
 router = APIRouter(tags=["dashboard"])
+
+
+@router.get("/meta", tags=["meta"])
+def meta():
+    """Public limits the web app needs before uploading (e.g. to shrink large photos client-side)."""
+    s = get_settings()
+    return {
+        "max_upload_bytes": s.max_upload_bytes,
+        "accepted_types": ["image/jpeg", "image/png", "image/webp"],
+        "storage": "blob" if s.use_blob else "local",
+    }
 
 
 @router.get("/dashboard", response_model=DashboardOut)
